@@ -1,6 +1,7 @@
 # Custom
 benchmark.jsonl
 EHRNoteQA/**
+dataset/**
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
