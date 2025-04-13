@@ -6,24 +6,19 @@
 import sys
 sys.path.append("src")
 
-import signal
 from config import config
 from template import *
 from utils import RetrievalSystem, DocExtracter
 import os
 import re
 import json
-import tqdm
 import torch
-import time
-import argparse
 import transformers
 from transformers import AutoTokenizer
 import openai
 from transformers import StoppingCriteria, StoppingCriteriaList
 import tiktoken
 # imports for added CoRAG methods
-import threading
 from copy import deepcopy
 from typing import Optional, List, Dict, Tuple
 from data_utils import format_input_context, parse_answer_logprobs
@@ -354,12 +349,12 @@ class RGAR:
 
     def retrieve_me_GAR_original_pro(self, question, options="", k=32, rrf_k=100):
 
-        num_sentences, other_sentences, last_sentence = self.split_sentences(
+        _, other_sentences, last_sentence = self.split_sentences(
             question)
         if other_sentences == "":
             original_answers = ""
         else:
-            parsed_list, original_answers = self.extract_factual_info(question)
+            _, original_answers = self.extract_factual_info(question)
         half_k = k // 2
         quarter_k = k // 4
         all_retrieved_snippets = []
@@ -391,9 +386,8 @@ class RGAR:
 
     def retrieve_me_GAR_original(self, question, options="", k=32, rrf_k=100):
 
-        num_sentences, other_sentences, last_sentence = self.split_sentences(
+        _, _ , last_sentence = self.split_sentences(
             question)
-        half_k = k // 2
         quarter_k = k // 4
         all_retrieved_snippets = []
         all_scores = []
@@ -433,7 +427,6 @@ class RGAR:
         snippets (List[Dict]): list of snippets to be used
         snippets_ids (List[Dict]): list of snippet ids to be used
         '''
-        copy_options = options
         options = '\n'.join([key+". "+options[key]
                             for key in sorted(options.keys())])
 
@@ -604,8 +597,7 @@ class RGAR:
                 json.dump(answers, f, indent=4)
 
         return answers[0] if len(answers) == 1 else answers, retrieved_snippets, scores
-    
-    
+
     def sample_path(
             self, query: str, task_desc: str,
             max_path_length: int = 3,
@@ -631,8 +623,7 @@ class RGAR:
             )
             self._truncate_long_messages(messages, max_length=max_message_length)
 
-            # TODO: call llama agent from RGAR instead
-            subquery: str = self.rgar.generate(messages=messages)
+            subquery: str = self.generate(messages=messages)
             subquery = _normalize_subquery(subquery)
 
             if subquery in past_subqueries:
@@ -669,8 +660,7 @@ class RGAR:
         )
         self._truncate_long_messages(messages, max_length=max_message_length)
 
-        # TODO: call llama agent from RGAR instead
-        return self.rgar.generate(messages=messages)
+        return self.generate(messages=messages)
 
     def _truncate_long_messages(self, messages: List[Dict], max_length: int):
         for msg in messages:
@@ -691,7 +681,7 @@ class RGAR:
         )
         self._truncate_long_messages(messages, max_length=max_message_length)
 
-        completion = self.rgar.generate(messages=messages)
+        completion = self.generate(messages=messages)
         subqueries = [_normalize_subquery(completion)]
         subqueries = list(set(subqueries))[:n]
 
@@ -700,8 +690,8 @@ class RGAR:
     def _get_subanswer_and_doc_ids(
             self, subquery: str, max_message_length: int = 4096
     ) -> Tuple[str, List]:
-        # Use RGAR's retrieval_system instead of search_by_http
-        retriever_results, scores = self.rgar.retrieval_system.retrieve(
+        # TODO: get scores??
+        retriever_results, scores = self.retrieval_system.retrieve(
             query=subquery, k=5, rrf_k=100
         )
         doc_ids: List[str] = [res['id'] for res in retriever_results]
@@ -713,7 +703,7 @@ class RGAR:
         )
         self._truncate_long_messages(messages, max_length=max_message_length)
 
-        subanswer: str = self.rgar.generate(messages=messages)
+        subanswer: str = self.generate(messages=messages)
         return subanswer, doc_ids
 
     def tree_search(
@@ -811,7 +801,7 @@ class RGAR:
         self._truncate_long_messages(messages, max_length=max_message_length)
 
         # TODO: call llama agent from RGAR instead
-        response = self.rgar.generate(messages=messages)
+        response = self.generate(messages=messages)
         answer_logprobs: List[float] = parse_answer_logprobs(response)
 
         return sum(answer_logprobs) / len(answer_logprobs)
@@ -830,7 +820,7 @@ class RGAR:
         for _ in range(num_rollouts):
             rollout_path: RagPath = self.sample_path(
                 query=path.query, task_desc=task_desc,
-                max_path_length=min(max_path_length, len(path.past_subqueries) + 2), # rollout at most 2 steps
+                max_path_length=min(max_path_length, len(path.past_subqueries) + 2),  # rollout at most 2 steps
                 temperature=temperature, max_message_length=max_message_length,
                 past_subqueries=deepcopy(path.past_subqueries),
                 past_subanswers=deepcopy(path.past_subanswers),
@@ -839,11 +829,8 @@ class RGAR:
             rollout_paths.append(rollout_path)
 
         scores: List[float] = [self._eval_single_path(p) for p in rollout_paths]
-        # TODO: should we use the min score instead?
         return sum(scores) / len(scores)
-
-
-
+    
 
 class CustomStoppingCriteria(StoppingCriteria):
     def __init__(self, stop_words, tokenizer, input_len=0):
