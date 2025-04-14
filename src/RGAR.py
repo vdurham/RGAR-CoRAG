@@ -347,42 +347,65 @@ class RGAR:
 
         return len(sentences), other_sentences, last_sentence
 
-    def retrieve_me_GAR_original_pro(self, question, options="", k=32, rrf_k=100):
+    def retrieve_me_GAR_original_pro(self, question, k=32, rrf_k=100,
+                                     search_method="best_of_n", n=3, expand_size=3,
+                                     num_rollouts=2, beam_size=1, max_path_length=3,
+                                     temperature=0.7):
+        """
+        Enhanced retrieval method that uses path sampling techniques (best_of_n or tree_search)
+        to generate better queries for retrieval.
+        
+        Args:
+            question: The main question to answer
+            options: Optional answer choices
+            k: Number of documents to retrieve
+            rrf_k: Parameter for reciprocal rank fusion
+            search_method: Either "best_of_n" or "tree_search"
+            n: Number of paths to sample for best_of_n
+            expand_size: Number of subqueries to generate per state for tree_search
+            num_rollouts: Number of rollouts per state for tree_search
+            beam_size: Beam size for tree_search
+            max_path_length: Maximum path length for search
+            temperature: Temperature for sampling
+            
+        Returns:
+            all_retrieved_snippets: List of retrieved document snippets
+            all_scores: Corresponding relevance scores
+        """
 
         _, other_sentences, last_sentence = self.split_sentences(
             question)
+        task_desc = "Retrieve relevant medical information to help answer this question"
         if other_sentences == "":
             original_answers = ""
         else:
             _, original_answers = self.extract_factual_info(question)
-        half_k = k // 2
-        quarter_k = k // 4
-        all_retrieved_snippets = []
-        all_scores = []
 
-        options = '\n'.join([key+". "+options[key]
-                            for key in sorted(options.keys())])
-        possible_answers = self.generate_possible_answer(
-            original_answers+last_sentence)
-        retrieved_snippets, scores = self.retrieval_system.retrieve(
-            original_answers+last_sentence+possible_answers, k=half_k, rrf_k=rrf_k)
-        all_retrieved_snippets.extend(retrieved_snippets)
-        all_scores.extend(scores)
+        if search_method == "best_of_n":
+            path = self.best_of_n(
+                query=original_answers+last_sentence,
+                task_desc=task_desc,
+                max_path_length=max_path_length,
+                temperature=temperature,
+                n=n,
+                k=k, rrf_k=rrf_k
+            )
+        elif search_method == "tree_search":
+            path = self.tree_search(
+                query=original_answers+last_sentence,
+                task_desc=task_desc,
+                max_path_length=max_path_length,
+                temperature=temperature,
+                expand_size=expand_size,
+                num_rollouts=num_rollouts,
+                beam_size=beam_size,
+                k=k, rrf_k=rrf_k
+            )
+        else:
+            raise ValueError(f"Unknown search method: {search_method}")
 
-        possible_content = self.generate_possible_content(
-            original_answers+last_sentence)
-        retrieved_snippets, scores = self.retrieval_system.retrieve(
-            possible_content, k=quarter_k, rrf_k=rrf_k)
-        all_retrieved_snippets.extend(retrieved_snippets)
-        all_scores.extend(scores)
-
-        possible_title = self.generate_possible_title(
-            original_answers+last_sentence)
-        retrieved_snippets, scores = self.retrieval_system.retrieve(
-            possible_title, k=quarter_k, rrf_k=rrf_k)
-        all_retrieved_snippets.extend(retrieved_snippets)
-        all_scores.extend(scores)
-        return all_retrieved_snippets, all_scores
+        return path
+        
 
     def retrieve_me_GAR_original(self, question, options="", k=32, rrf_k=100):
 
@@ -545,6 +568,7 @@ class RGAR:
                         question, copy_options, k, rrf_k)
                 # transform the question by RGAR, easy implementation for round 1
                 elif self.me == 2:
+                    #TODO: alter data structure to accept the path data structure!!
                     retrieved_snippets, scores = self.retrieve_me_GAR_original_pro(
                         question, copy_options, k, rrf_k)
 
@@ -603,6 +627,7 @@ class RGAR:
             max_path_length: int = 3,
             max_message_length: int = 4096,
             temperature: float = 0.7,
+            k: int = 32, rrf_k: int = 100,
             **kwargs
     ) -> RagPath:
         past_subqueries: List[str] = kwargs.pop('past_subqueries', [])
@@ -612,7 +637,14 @@ class RGAR:
 
         subquery_temp: float = temperature
         num_llm_calls: int = 0
-        max_num_llm_calls: int = 4 * (max_path_length - len(past_subqueries))
+        max_num_llm_calls: int = 3 * (max_path_length - len(past_subqueries))
+
+        # from RGAR
+        half_k = k // 2
+        quarter_k = k // 4
+        all_retrieved_snippets = []
+        all_scores = []
+
         while len(past_subqueries) < max_path_length and num_llm_calls < max_num_llm_calls:
             num_llm_calls += 1
             messages: List[Dict] = get_generate_subquery_prompt(
@@ -621,7 +653,25 @@ class RGAR:
                 past_subanswers=past_subanswers,
                 task_desc=task_desc,
             )
-            self._truncate_long_messages(messages, max_length=max_message_length)
+            possible_content = self.generate_possible_content(query)
+            retrieved_snippets, scores = self.retrieval_system.retrieve(
+                possible_content, k=quarter_k, rrf_k=rrf_k)
+            all_retrieved_snippets.extend(retrieved_snippets)
+            all_scores.extend(scores)
+
+            possible_title = self.generate_possible_title(query)
+            retrieved_snippets, scores = self.retrieval_system.retrieve(
+                possible_title, k=quarter_k, rrf_k=rrf_k)
+            all_retrieved_snippets.extend(retrieved_snippets)
+            all_scores.extend(scores)
+
+            possible_answers = self.generate_possible_answer(query)
+            retrieved_snippets, scores = self.retrieval_system.retrieve(
+                query+possible_answers, k=half_k, rrf_k=rrf_k)
+            all_retrieved_snippets.extend(retrieved_snippets)
+            all_scores.extend(scores)
+
+            return all_retrieved_snippets, all_scores
 
             subquery: str = self.generate(messages=messages)
             subquery = _normalize_subquery(subquery)
@@ -712,13 +762,14 @@ class RGAR:
             max_message_length: int = 4096,
             temperature: float = 0.7,
             expand_size: int = 4, num_rollouts: int = 2, beam_size: int = 1,
+            k: int =32, rrf_k: int = 100,
             **kwargs
     ) -> RagPath:
         return self._search(
             query=query, task_desc=task_desc,
             max_path_length=max_path_length,
             max_message_length=max_message_length,
-            temperature=temperature,
+            temperature=temperature,k=k,rrf_k=rrf_k,
             expand_size=expand_size, num_rollouts=num_rollouts, beam_size=beam_size,
             **kwargs
         )
@@ -729,6 +780,7 @@ class RGAR:
             max_message_length: int = 4096,
             temperature: float = 0.7,
             n: int = 4,
+            k: int =32, rrf_k: int = 100,
             **kwargs
     ) -> RagPath:
         sampled_paths: List[RagPath] = []
@@ -738,6 +790,7 @@ class RGAR:
                 max_path_length=max_path_length,
                 max_message_length=max_message_length,
                 temperature=0. if idx == 0 else temperature,
+                k=k, rrf_k=rrf_k,
                 **kwargs
             )
             sampled_paths.append(path)
