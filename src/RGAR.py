@@ -373,18 +373,14 @@ class RGAR:
             all_scores: Corresponding relevance scores
         """
 
-        _, other_sentences, last_sentence = self.split_sentences(
+        # last sentence is always the question, prior info is patient record info
+        _, patient_context, patient_question = self.split_sentences(
             question)
-        task_desc = "Retrieve relevant medical information to help answer this question"
-        if other_sentences == "":
-            original_answers = ""
-        else:
-            _, original_answers = self.extract_factual_info(question)
 
         if search_method == "best_of_n":
             path = self.best_of_n(
-                query=original_answers+last_sentence,
-                task_desc=task_desc,
+                query=patient_question,
+                context=patient_context,
                 max_path_length=max_path_length,
                 temperature=temperature,
                 n=n,
@@ -392,8 +388,8 @@ class RGAR:
             )
         elif search_method == "tree_search":
             path = self.tree_search(
-                query=original_answers+last_sentence,
-                task_desc=task_desc,
+                query=patient_question,
+                context=patient_context,
                 max_path_length=max_path_length,
                 temperature=temperature,
                 expand_size=expand_size,
@@ -623,7 +619,7 @@ class RGAR:
         return answers[0] if len(answers) == 1 else answers, retrieved_snippets, scores
 
     def sample_path(
-            self, query: str, task_desc: str,
+            self, query: str, context: str,
             max_path_length: int = 3,
             max_message_length: int = 4096,
             temperature: float = 0.7,
@@ -651,8 +647,10 @@ class RGAR:
                 query=query,
                 past_subqueries=past_subqueries,
                 past_subanswers=past_subanswers,
-                task_desc=task_desc,
+                context=context,
             )
+
+            # TODO: add self.extract_factual_info(question)
             possible_content = self.generate_possible_content(query)
             retrieved_snippets, scores = self.retrieval_system.retrieve(
                 possible_content, k=quarter_k, rrf_k=rrf_k)
@@ -697,7 +695,7 @@ class RGAR:
         )
 
     def generate_final_answer(
-            self, corag_sample: RagPath, task_desc: str,
+            self, corag_sample: RagPath, context: str,
             max_message_length: int = 4096,
             documents: Optional[List[str]] = None, **kwargs
     ) -> str:
@@ -705,7 +703,7 @@ class RGAR:
             query=corag_sample.query,
             past_subqueries=corag_sample.past_subqueries or [],
             past_subanswers=corag_sample.past_subanswers or [],
-            task_desc=task_desc,
+            context=context,
             documents=documents,
         )
         self._truncate_long_messages(messages, max_length=max_message_length)
@@ -722,12 +720,12 @@ class RGAR:
                     [msg['content']], tokenizer=self.tokenizer, max_length=max_length, truncate_from_middle=True
                 )[0]
 
-    def sample_subqueries(self, query: str, task_desc: str, n: int = 10, max_message_length: int = 4096, **kwargs) -> List[str]:
+    def sample_subqueries(self, query: str, context: str, n: int = 10, max_message_length: int = 4096, **kwargs) -> List[str]:
         messages: List[Dict] = get_generate_subquery_prompt(
             query=query,
             past_subqueries=kwargs.pop('past_subqueries', []),
             past_subanswers=kwargs.pop('past_subanswers', []),
-            task_desc=task_desc,
+            context=context,
         )
         self._truncate_long_messages(messages, max_length=max_message_length)
 
@@ -757,7 +755,7 @@ class RGAR:
         return subanswer, doc_ids
 
     def tree_search(
-            self, query: str, task_desc: str,
+            self, query: str, context: str,
             max_path_length: int = 3,
             max_message_length: int = 4096,
             temperature: float = 0.7,
@@ -766,7 +764,7 @@ class RGAR:
             **kwargs
     ) -> RagPath:
         return self._search(
-            query=query, task_desc=task_desc,
+            query=query, context=context,
             max_path_length=max_path_length,
             max_message_length=max_message_length,
             temperature=temperature,k=k,rrf_k=rrf_k,
@@ -775,7 +773,7 @@ class RGAR:
         )
 
     def best_of_n(
-            self, query: str, task_desc: str,
+            self, query: str, context: str,
             max_path_length: int = 3,
             max_message_length: int = 4096,
             temperature: float = 0.7,
@@ -786,7 +784,7 @@ class RGAR:
         sampled_paths: List[RagPath] = []
         for idx in range(n):
             path: RagPath = self.sample_path(
-                query=query, task_desc=task_desc,
+                query=query, context=context,
                 max_path_length=max_path_length,
                 max_message_length=max_message_length,
                 temperature=0. if idx == 0 else temperature,
@@ -799,7 +797,7 @@ class RGAR:
         return sampled_paths[scores.index(min(scores))]
 
     def _search(
-            self, query: str, task_desc: str,
+            self, query: str, context: str,
             max_path_length: int = 3,
             max_message_length: int = 4096,
             temperature: float = 0.7,
@@ -811,7 +809,7 @@ class RGAR:
             new_candidates: List[RagPath] = []
             for candidate in candidates:
                 new_subqueries: List[str] = self.sample_subqueries(
-                    query=query, task_desc=task_desc,
+                    query=query, context=context,
                     past_subqueries=deepcopy(candidate.past_subqueries),
                     past_subanswers=deepcopy(candidate.past_subanswers),
                     n=expand_size, temperature=temperature, max_message_length=max_message_length
@@ -831,7 +829,7 @@ class RGAR:
                 for path in new_candidates:
                     score = self._eval_state_without_answer(
                         path, num_rollouts=num_rollouts,
-                        task_desc=task_desc,
+                        context=context,
                         max_path_length=max_path_length,
                         temperature=temperature,
                         max_message_length=max_message_length
@@ -860,7 +858,7 @@ class RGAR:
         return sum(answer_logprobs) / len(answer_logprobs)
 
     def _eval_state_without_answer(
-            self, path: RagPath, num_rollouts: int, task_desc: str,
+            self, path: RagPath, num_rollouts: int, context: str,
             max_path_length: int = 3,
             temperature: float = 0.7,
             max_message_length: int = 4096
@@ -872,7 +870,7 @@ class RGAR:
         rollout_paths: List[RagPath] = []
         for _ in range(num_rollouts):
             rollout_path: RagPath = self.sample_path(
-                query=path.query, task_desc=task_desc,
+                query=path.query, context=context,
                 max_path_length=min(max_path_length, len(path.past_subqueries) + 2),  # rollout at most 2 steps
                 temperature=temperature, max_message_length=max_message_length,
                 past_subqueries=deepcopy(path.past_subqueries),
