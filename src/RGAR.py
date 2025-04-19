@@ -605,17 +605,14 @@ class RGAR:
             self, query: str, context: str,
             max_path_length: int = 3,
             max_message_length: int = 4096,
-            temperature: float = 0.7,
             k: int = 32, rrf_k: int = 100,
             **kwargs
     ) -> RagPath:
         past_subqueries: List[str] = kwargs.pop('past_subqueries', [])
         past_subanswers: List[str] = kwargs.pop('past_subanswers', [])
-        past_doc_ids: List[List[str]] = kwargs.pop('past_doc_ids', [])
-        assert len(past_subqueries) == len(past_subanswers) == len(past_doc_ids)
+        assert len(past_subqueries) == len(past_subanswers)
 
         # For a single path, generate max_path_length subqueries and subanswers
-        subquery_temp: float = temperature
         num_llm_calls: int = 0
         max_num_llm_calls: int = 3 * (max_path_length - len(past_subqueries))
 
@@ -658,45 +655,26 @@ class RGAR:
                 continue
 
             subquery_snippets, subquery_scores = self.retrieval_system.retrieve(
-                query=subquery, k=k//4, rrf_k=rrf_k
-            )
-
+                query=subquery, k=k//4, rrf_k=rrf_k)
             all_retrieved_snippets.extend(subquery_snippets)
             all_scores.extend(subquery_scores)
 
-            # generate subanswer
-            
-
-            possible_answers = self.generate_possible_answer(patient_facts+query)
-            retrieved_snippets, scores = self.retrieval_system.retrieve(
-                context+query+possible_answers, k=k//2, rrf_k=rrf_k)
-            all_retrieved_snippets.extend(retrieved_snippets)
-            all_scores.extend(scores)
-
-
-
-            # return all_retrieved_snippets, all_scores
-
             subquery = _normalize_subquery(subquery)
 
-            if subquery in past_subqueries:
-                subquery_temp = max(subquery_temp, 0.7)
-                continue
+            messages: List[Dict] = get_generate_intermediate_answer_prompt(
+                subquery=subquery,
+                documents=documents)
+            self._truncate_long_messages(messages, max_length=max_message_length)
 
-            subquery_temp = temperature
-            subanswer, doc_ids = self._get_subanswer_and_doc_ids(
-                subquery=subquery, max_message_length=max_message_length
-            )
+            subanswer: str = self.generate(messages=messages)
 
             past_subqueries.append(subquery)
             past_subanswers.append(subanswer)
-            past_doc_ids.append(doc_ids)
 
         return RagPath(
             query=query,
             past_subqueries=past_subqueries,
-            past_subanswers=past_subanswers,
-            past_doc_ids=past_doc_ids,
+            past_subanswers=past_subanswers
         )
 
     def generate_final_answer(
@@ -740,43 +718,6 @@ class RGAR:
 
         return subqueries
 
-    def _get_subanswer_and_doc_ids(
-            self, subquery: str, max_message_length: int = 4096
-    ) -> Tuple[str, List]:
-        # TODO: get scores??
-        retriever_results, scores = self.retrieval_system.retrieve(
-            query=subquery, k=5, rrf_k=100
-        )
-        doc_ids: List[str] = [res['id'] for res in retriever_results]
-        documents: List[str] = [format_input_context(self.corpus[int(doc_id)]) for doc_id in doc_ids][::-1]
-
-        messages: List[Dict] = get_generate_intermediate_answer_prompt(
-            subquery=subquery,
-            documents=documents,
-        )
-        self._truncate_long_messages(messages, max_length=max_message_length)
-
-        subanswer: str = self.generate(messages=messages)
-        return subanswer, doc_ids
-
-    def tree_search(
-            self, query: str, context: str,
-            max_path_length: int = 3,
-            max_message_length: int = 4096,
-            temperature: float = 0.7,
-            expand_size: int = 4, num_rollouts: int = 2, beam_size: int = 1,
-            k: int = 32, rrf_k: int = 100,
-            **kwargs
-    ) -> RagPath:
-        return self._search(
-            query=query, context=context,
-            max_path_length=max_path_length,
-            max_message_length=max_message_length,
-            temperature=temperature, k=k, rrf_k=rrf_k,
-            expand_size=expand_size, num_rollouts=num_rollouts, beam_size=beam_size,
-            **kwargs
-        )
-
     def best_of_n(
             self, query: str, context: str,
             max_path_length: int = 3,
@@ -801,53 +742,6 @@ class RGAR:
         scores: List[float] = [self._eval_single_path(p) for p in sampled_paths]
         return sampled_paths[scores.index(min(scores))]
 
-    def _search(
-            self, query: str, context: str,
-            max_path_length: int = 3,
-            max_message_length: int = 4096,
-            temperature: float = 0.7,
-            expand_size: int = 4, num_rollouts: int = 2, beam_size: int = 1,
-            **kwargs
-    ) -> RagPath:
-        candidates: List[RagPath] = [RagPath(query=query, past_subqueries=[], past_subanswers=[], past_doc_ids=[])]
-        for step in range(max_path_length):
-            new_candidates: List[RagPath] = []
-            for candidate in candidates:
-                new_subqueries: List[str] = self.sample_subqueries(
-                    query=query, context=context,
-                    past_subqueries=deepcopy(candidate.past_subqueries),
-                    past_subanswers=deepcopy(candidate.past_subanswers),
-                    n=expand_size, temperature=temperature, max_message_length=max_message_length
-                )
-                for subquery in new_subqueries:
-                    new_candidate: RagPath = deepcopy(candidate)
-                    new_candidate.past_subqueries.append(subquery)
-                    subanswer, doc_ids = self._get_subanswer_and_doc_ids(
-                        subquery=subquery, max_message_length=max_message_length
-                    )
-                    new_candidate.past_subanswers.append(subanswer)
-                    new_candidate.past_doc_ids.append(doc_ids)
-                    new_candidates.append(new_candidate)
-
-            if len(new_candidates) > beam_size:
-                scores: List[float] = []
-                for path in new_candidates:
-                    score = self._eval_state_without_answer(
-                        path, num_rollouts=num_rollouts,
-                        context=context,
-                        max_path_length=max_path_length,
-                        temperature=temperature,
-                        max_message_length=max_message_length
-                    )
-                    scores.append(score)
-
-                # lower scores are better
-                new_candidates = [c for c, s in sorted(zip(new_candidates, scores), key=lambda x: x[1])][:beam_size]
-
-            candidates = new_candidates
-
-        return candidates[0]
-
     def _eval_single_path(self, current_path: RagPath, max_message_length: int = 4096) -> float:
         messages: List[Dict] = get_generate_intermediate_answer_prompt(
             subquery=current_path.query,
@@ -861,31 +755,6 @@ class RGAR:
         answer_logprobs: List[float] = parse_answer_logprobs(response)
 
         return sum(answer_logprobs) / len(answer_logprobs)
-
-    def _eval_state_without_answer(
-            self, path: RagPath, num_rollouts: int, context: str,
-            max_path_length: int = 3,
-            temperature: float = 0.7,
-            max_message_length: int = 4096
-    ) -> float:
-        assert len(path.past_subqueries) > 0
-        if num_rollouts <= 0:
-            return self._eval_single_path(path)
-
-        rollout_paths: List[RagPath] = []
-        for _ in range(num_rollouts):
-            rollout_path: RagPath = self.sample_path(
-                query=path.query, context=context,
-                max_path_length=min(max_path_length, len(path.past_subqueries) + 2),  # rollout at most 2 steps
-                temperature=temperature, max_message_length=max_message_length,
-                past_subqueries=deepcopy(path.past_subqueries),
-                past_subanswers=deepcopy(path.past_subanswers),
-                past_doc_ids=deepcopy(path.past_doc_ids),
-            )
-            rollout_paths.append(rollout_path)
-
-        scores: List[float] = [self._eval_single_path(p) for p in rollout_paths]
-        return sum(scores) / len(scores)
 
 
 class CustomStoppingCriteria(StoppingCriteria):
