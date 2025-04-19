@@ -3,28 +3,28 @@
 # we developed RGAR based on MedRAG
 # we developed RAG systems without CoT based on MedRAG
 # we add support for qwens
+from utils import batch_truncate
+from agent_utils import RagPath
+from prompts import get_generate_subquery_prompt, get_generate_intermediate_answer_prompt, get_generate_final_answer_prompt
+from data_utils import format_input_context, parse_answer_logprobs
+from typing import Optional, List, Dict, Tuple
+from copy import deepcopy
+import tiktoken
+from transformers import StoppingCriteria, StoppingCriteriaList
+import openai
+from transformers import AutoTokenizer
+import transformers
+import torch
+import json
+import re
+import os
+from utils import RetrievalSystem, DocExtracter
+from template import *
+from config import config
 import sys
 sys.path.append("src")
 
-from config import config
-from template import *
-from utils import RetrievalSystem, DocExtracter
-import os
-import re
-import json
-import torch
-import transformers
-from transformers import AutoTokenizer
-import openai
-from transformers import StoppingCriteria, StoppingCriteriaList
-import tiktoken
 # imports for added CoRAG methods
-from copy import deepcopy
-from typing import Optional, List, Dict, Tuple
-from data_utils import format_input_context, parse_answer_logprobs
-from prompts import get_generate_subquery_prompt, get_generate_intermediate_answer_prompt, get_generate_final_answer_prompt
-from agent_utils import RagPath
-from utils import batch_truncate
 
 
 def _normalize_subquery(subquery: str) -> str:
@@ -35,6 +35,7 @@ def _normalize_subquery(subquery: str) -> str:
         subquery = re.sub(r'^Intermediate query \d+: ', '', subquery)
 
     return subquery
+
 
 class TimeoutException(Exception):
     pass
@@ -226,7 +227,7 @@ class RGAR:
         return ans
 
     def extract_factual_info_rag(self, question, retrieved_snippets):
-        num_sentences, other_sentences, last_sentence = self.split_sentences(
+        _, other_sentences, last_sentence = self.split_sentences(
             question)
         contexts = ["Document [{:d}] (Title: {:s}) {:s}".format(
             idx, retrieved_snippets[idx]["title"], retrieved_snippets[idx]["content"]) for idx in range(len(retrieved_snippets))]
@@ -254,14 +255,14 @@ class RGAR:
             answers.append(re.sub("\s+", " ", ans))
         return answers
 
-    def extract_factual_info(self, question):
+    def extract_factual_info(self, question, context):
         # prompt = '''Please extract the key factual information relevant to solving this problem and present it as a Python list.
         # Use concise descriptions for each item, formatted as ["key detail 1", ..., "key detail N"].'''
-        prompt = '''Please extract the key factual information relevant to solving this problem and present it as a Python list. 
+        prompt = '''Please extract the key factual information relevant to addressing the question and present it as a Python list. 
         Use concise descriptions for each item, formatted as ["key detail 1", ..., "key detail N"]. For example, ['Patient age: 39 years (Middle-aged)', 'Symptoms: fever, chills, left lower quadrant abdominal pain', 'Vital signs: high temperature (39.1°C or 102.3°F), tachycardia (pulse 126/min), tachypnea (respirations 28/min) and hypotension (blood pressure 80/50 mmHg)', 'Physical exam findings: mucopurulent discharge from the cervical os and left adnexal tenderness', 'Laboratory results: low platelet count (14,200/mm^3), elevated D-dimer (965 ng/mL)', 'Phenol test result: identification of a phosphorylated N-acetylglucosame dimmer with 6 fatty acids attached to a polysaccharide side chain']'''
         messages = [
             # {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question + "\n" + prompt},
+            {"role": "user", "content": context + "\n" + prompt + "\n Question:" + question},
         ]
 
         ans = self.generate(messages)
@@ -295,7 +296,7 @@ class RGAR:
         answers.append(re.sub("\s+", " ", ans))
         answers = answers[0]
 
-        # print(f"Generated Answer: {answers}")
+        print(f"Generated Answer: {answers}")
         return answers
 
     def generate_possible_answer(self, question):
@@ -312,7 +313,7 @@ class RGAR:
         answers.append(re.sub("\s+", " ", ans))
         answers = answers[0]
 
-        # print(f"Generated Answer: {answers}")
+        print(f"Generated Answer: {answers}")
         return answers
 
     def generate_possible_title(self, question):
@@ -329,7 +330,7 @@ class RGAR:
         answers.append(re.sub("\s+", " ", ans))
         answers = answers[0]
 
-        # print(f"Generated Answer: {answers}")
+        print(f"Generated Answer: {answers}")
         return answers
 
     def split_sentences(self, text):
@@ -354,23 +355,6 @@ class RGAR:
         """
         Enhanced retrieval method that uses path sampling techniques (best_of_n or tree_search)
         to generate better queries for retrieval.
-        
-        Args:
-            question: The main question to answer
-            options: Optional answer choices
-            k: Number of documents to retrieve
-            rrf_k: Parameter for reciprocal rank fusion
-            search_method: Either "best_of_n" or "tree_search"
-            n: Number of paths to sample for best_of_n
-            expand_size: Number of subqueries to generate per state for tree_search
-            num_rollouts: Number of rollouts per state for tree_search
-            beam_size: Beam size for tree_search
-            max_path_length: Maximum path length for search
-            temperature: Temperature for sampling
-            
-        Returns:
-            all_retrieved_snippets: List of retrieved document snippets
-            all_scores: Corresponding relevance scores
         """
 
         # last sentence is always the question, prior info is patient record info
@@ -401,11 +385,10 @@ class RGAR:
             raise ValueError(f"Unknown search method: {search_method}")
 
         return path
-        
 
     def retrieve_me_GAR_original(self, question, options="", k=32, rrf_k=100):
 
-        _, _ , last_sentence = self.split_sentences(
+        _, _, last_sentence = self.split_sentences(
             question)
         quarter_k = k // 4
         all_retrieved_snippets = []
@@ -564,7 +547,7 @@ class RGAR:
                         question, copy_options, k, rrf_k)
                 # transform the question by RGAR, easy implementation for round 1
                 elif self.me == 2:
-                    #TODO: alter data structure to accept the path data structure!!
+                    # TODO: alter data structure to accept the path data structure!!
                     retrieved_snippets, scores = self.retrieve_me_GAR_original_pro(
                         question, copy_options, k, rrf_k)
 
@@ -631,47 +614,69 @@ class RGAR:
         past_doc_ids: List[List[str]] = kwargs.pop('past_doc_ids', [])
         assert len(past_subqueries) == len(past_subanswers) == len(past_doc_ids)
 
+        # For a single path, generate max_path_length subqueries and subanswers
         subquery_temp: float = temperature
         num_llm_calls: int = 0
         max_num_llm_calls: int = 3 * (max_path_length - len(past_subqueries))
 
         # from RGAR
-        half_k = k // 2
-        quarter_k = k // 4
         all_retrieved_snippets = []
         all_scores = []
 
+        # get relevant patient facts formatted
+        patient_facts, _ = self.extract_factual_info(query, context)
+
+        # generate possible medical titles and content
+        possible_content = self.generate_possible_content(query)
+        retrieved_snippets, scores = self.retrieval_system.retrieve(
+            possible_content, k=k//4, rrf_k=rrf_k)
+        all_retrieved_snippets.extend(retrieved_snippets)
+        all_scores.extend(scores)
+        
+        possible_titles = self.generate_possible_title(query)
+        retrieved_snippets, scores = self.retrieval_system.retrieve(
+            possible_titles, k=k//4, rrf_k=rrf_k)
+        all_retrieved_snippets.extend(retrieved_snippets)
+        all_scores.extend(scores)
+
+
         while len(past_subqueries) < max_path_length and num_llm_calls < max_num_llm_calls:
             num_llm_calls += 1
-            messages: List[Dict] = get_generate_subquery_prompt(
-                query=query,
+
+            # generate subquery 
+            subquery_messages: List[Dict] = get_generate_subquery_prompt(
+                query=query, 
                 past_subqueries=past_subqueries,
                 past_subanswers=past_subanswers,
-                context=context,
+                extracted_facts=patient_facts
+            )
+            subquery = self.generate(messages=subquery_messages)
+            subquery = subquery.strip()
+
+            # skip if seen before
+            if subquery in past_subqueries:
+                continue
+
+            subquery_snippets, subquery_scores = self.retrieval_system.retrieve(
+                query=subquery, k=k//4, rrf_k=rrf_k
             )
 
-            # TODO: add self.extract_factual_info(question)
-            possible_content = self.generate_possible_content(query)
+            all_retrieved_snippets.extend(subquery_snippets)
+            all_scores.extend(subquery_scores)
+
+            # generate subanswer
+            
+
+            possible_answers = self.generate_possible_answer(patient_facts+query)
             retrieved_snippets, scores = self.retrieval_system.retrieve(
-                possible_content, k=quarter_k, rrf_k=rrf_k)
+                context+query+possible_answers, k=k//2, rrf_k=rrf_k)
             all_retrieved_snippets.extend(retrieved_snippets)
             all_scores.extend(scores)
 
-            possible_title = self.generate_possible_title(query)
-            retrieved_snippets, scores = self.retrieval_system.retrieve(
-                possible_title, k=quarter_k, rrf_k=rrf_k)
-            all_retrieved_snippets.extend(retrieved_snippets)
-            all_scores.extend(scores)
 
-            possible_answers = self.generate_possible_answer(query)
-            retrieved_snippets, scores = self.retrieval_system.retrieve(
-                query+possible_answers, k=half_k, rrf_k=rrf_k)
-            all_retrieved_snippets.extend(retrieved_snippets)
-            all_scores.extend(scores)
 
-            return all_retrieved_snippets, all_scores
+            # return all_retrieved_snippets, all_scores
 
-            subquery: str = self.generate(messages=messages)
             subquery = _normalize_subquery(subquery)
 
             if subquery in past_subqueries:
@@ -760,14 +765,14 @@ class RGAR:
             max_message_length: int = 4096,
             temperature: float = 0.7,
             expand_size: int = 4, num_rollouts: int = 2, beam_size: int = 1,
-            k: int =32, rrf_k: int = 100,
+            k: int = 32, rrf_k: int = 100,
             **kwargs
     ) -> RagPath:
         return self._search(
             query=query, context=context,
             max_path_length=max_path_length,
             max_message_length=max_message_length,
-            temperature=temperature,k=k,rrf_k=rrf_k,
+            temperature=temperature, k=k, rrf_k=rrf_k,
             expand_size=expand_size, num_rollouts=num_rollouts, beam_size=beam_size,
             **kwargs
         )
@@ -778,7 +783,7 @@ class RGAR:
             max_message_length: int = 4096,
             temperature: float = 0.7,
             n: int = 4,
-            k: int =32, rrf_k: int = 100,
+            k: int = 32, rrf_k: int = 100,
             **kwargs
     ) -> RagPath:
         sampled_paths: List[RagPath] = []
@@ -881,7 +886,7 @@ class RGAR:
 
         scores: List[float] = [self._eval_single_path(p) for p in rollout_paths]
         return sum(scores) / len(scores)
-    
+
 
 class CustomStoppingCriteria(StoppingCriteria):
     def __init__(self, stop_words, tokenizer, input_len=0):
