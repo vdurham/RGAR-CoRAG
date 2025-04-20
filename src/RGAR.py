@@ -24,9 +24,6 @@ from template import *
 from config import config
 
 
-# imports for added CoRAG methods
-
-
 def _normalize_subquery(subquery: str) -> str:
     subquery = subquery.strip()
     if subquery.startswith('"') and subquery.endswith('"'):
@@ -162,7 +159,7 @@ class RGAR:
             [CustomStoppingCriteria(stop_str, self.tokenizer, input_len)])
         return stopping_criteria
 
-    def generate(self, messages, return_logprobs=False):
+    def generate(self, messages, use_temp=False):
         '''
         generate response given messages
         '''
@@ -188,31 +185,19 @@ class RGAR:
                     self.tokenizer.encode(prompt, add_special_tokens=True)))
             elif "llama-3" in self.llm_name.lower():
                 # For llama-3.2, we can get log probabilities
-                if return_logprobs:
+                if use_temp:
                     response = self.model(
                         prompt,
-                        temperature=None,
-                        top_p=None,
-                        do_sample=False,
+                        temperature=0.7,
+                        top_p=0.9,
+                        do_sample=True,
                         eos_token_id=self.tokenizer.eos_token_id,
                         pad_token_id=self.tokenizer.eos_token_id,
                         max_new_tokens=4096,
                         repetition_penalty=1.2,
                         truncation=True,
-                        stopping_criteria=None,
-                        output_scores=True,  # Request log probabilities
-                        return_dict_in_generate=True
+                        stopping_criteria=None
                     )
-                    # Extract log probabilities
-                    logprobs = []
-                    for token_scores in response.scores:
-                        # Get the log probability of the chosen token
-                        logprob = token_scores[0].max().item()
-                        logprobs.append(logprob)
-                    
-                    # ans = response.sequences[0][len(self.tokenizer.encode(prompt)):]
-                    # ans = self.tokenizer.decode(ans, skip_special_tokens=True)
-                    return response, logprobs
                 else:
                     response = self.model(
                         prompt,
@@ -297,7 +282,7 @@ class RGAR:
         answers.append(re.sub("\s+", " ", ans))
         answers = answers[0]
 
-        print(f"Generated Answer: {answers}")
+        # print(f"Generated Answer: {answers}")
 
         list_match = re.search(r'\[(.*?)\]', answers)
         
@@ -311,12 +296,12 @@ class RGAR:
             # Filter out empty items
             matched_items = [item for item in matched_items if item]
             
-            print(f"number queries: {len(matched_items)}")
-            print(f"extract info: {matched_items}")
+            # print(f"number queries: {len(matched_items)}")
+            # print(f"extract info: {matched_items}")
             
             return matched_items, answers
         else:
-            print("no info found")
+            # print("no info found")
             return [], answers
 
     def generate_possible_content(self, question):
@@ -332,7 +317,7 @@ class RGAR:
         answers.append(re.sub("\s+", " ", ans))
         answers = answers[0]
 
-        print(f"Generated Possible Content: {answers}")
+        # print(f"Generated Possible Content: {answers}")
         return answers
 
     def generate_possible_answer(self, question):
@@ -349,7 +334,7 @@ class RGAR:
         answers.append(re.sub("\s+", " ", ans))
         answers = answers[0]
 
-        print(f"Generated Possible Answers: {answers}")
+        # print(f"Generated Possible Answers: {answers}")
         return answers
 
     def generate_possible_title(self, question):
@@ -366,7 +351,7 @@ class RGAR:
         answers.append(re.sub("\s+", " ", ans))
         answers = answers[0]
 
-        print(f"Generated Possible Titles: {answers}")
+        # print(f"Generated Possible Titles: {answers}")
         return answers
 
     def split_sentences(self, text):
@@ -617,7 +602,7 @@ class RGAR:
             with open(os.path.join(save_dir, "response.json"), 'w') as f:
                 json.dump(answers, f, indent=4)
 
-        return answers[0] if len(answers) == 1 else answers, retrieved_snippets, scores
+        return answers[0] if len(answers) == 1 else answers, retrieved_snippets
 
     def sample_path(
             self, query: str, context: str,
@@ -670,7 +655,8 @@ class RGAR:
                 past_subanswers=past_subanswers,
                 extracted_facts=patient_facts
             )
-            subquery = self.generate(messages=subquery_messages)
+            subquery = self.generate(messages=subquery_messages, use_temp=True)
+            print(f"Generated Subquery: {subquery}")
             subquery = subquery.strip()
 
             # skip if seen before
@@ -693,9 +679,11 @@ class RGAR:
                 documents=combined_docs)
             
             # Get both answer and log probabilities in one call
-            subanswer, logprobs = self.generate(messages=messages, return_logprobs=True)
+            subanswer = self.generate(messages=messages, use_temp=True)
+            subanswer = subanswer.strip()
             print(f"Generated Subanswer: {subanswer}")
             
+            logprobs =None
             # Store the log probabilities directly in the path
             if logprobs:
                 scores.append(sum(logprobs) / len(logprobs))

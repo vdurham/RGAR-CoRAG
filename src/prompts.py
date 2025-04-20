@@ -38,18 +38,36 @@ Generate a specific, focused follow-up question that addresses key medical detai
     return messages
 
 
-def get_generate_intermediate_answer_prompt(subquery: str, documents: List[str]) -> List[Dict]:
-    context = ''
-    for doc in documents:
-        context += f"""{doc}\n"""
-
-    prompt = f"""Given the following documents, generate an appropriate answer for the query. DO NOT hallucinate any information, only use the provided documents to generate the answer. Respond "No relevant information found" if the documents do not contain useful information.
+def get_generate_intermediate_answer_prompt(subquery: str, documents: List[str], max_tokens: int = 4096) -> List[Dict]:
+    prompt_template = """Given the following documents, generate an appropriate answer for the query. DO NOT hallucinate any information, only use the provided documents to generate the answer. Respond "No relevant information found" if the documents do not contain useful information.
 ## Documents
-{context.strip()}
+{context}
 ## Query
 {subquery}
 Respond with a concise answer only, do not explain yourself or output anything else."""
-
+    
+    # Calculate tokens for the fixed parts (approximate)
+    fixed_tokens = len(prompt_template.split()) + len(subquery.split())
+    max_doc_tokens = max_tokens - fixed_tokens
+    
+    # Build context while respecting token limit
+    context = ''
+    current_tokens = 0
+    
+    for doc in documents:
+        doc_tokens = len(doc.split())
+        if current_tokens + doc_tokens > max_doc_tokens:
+            # If we can't fit the whole document, stop adding more
+            break
+        context += f"{doc}\n"
+        current_tokens += doc_tokens
+    
+    # Format the final prompt
+    prompt = prompt_template.format(
+        context=context.strip(),
+        subquery=subquery
+    )
+    
     messages: List[Dict] = [
         {'role': 'user', 'content': prompt}
     ]
@@ -74,7 +92,7 @@ def get_generate_final_answer_prompt(
 {query}
 ## Options
 {options}
-Please generate your output in JSON format as {{"answer_choice": "X"}} where X is one of {', '.join(sorted(options.keys()))}."""
+Please generate your output in JSON format as {{"answer_choice": "X"}}. Do not include any other text or explanations."""
 
     messages: List[Dict] = [
         {'role': 'user', 'content': prompt}

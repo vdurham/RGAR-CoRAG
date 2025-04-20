@@ -50,6 +50,9 @@ class CustomizeSentenceTransformer(SentenceTransformer): # change the default po
             print(f"Using cached model: {model_name_or_path}")
             return self._cached_models[model_name_or_path]
 
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         print("No sentence-transformers model found with name {}. Creating a new one with CLS pooling.".format(model_name_or_path))
         token = kwargs.get('token', None)
         cache_folder = kwargs.get('cache_folder', None)
