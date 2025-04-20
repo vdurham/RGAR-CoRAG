@@ -31,20 +31,7 @@ To access Llama models:
 
 For more details, refer to the [Llama-2-7b-chat-hf model card](https://huggingface.co/meta-llama/Llama-2-7b-chat-hf).
 
-### Qwen Models
-
-Accessing Qwen models is straightforward and does not require special permissions:
-
-1. **Find Qwen models on Hugging Face**: Search for "Qwen" in the [Hugging Face models section](https://huggingface.co/models?q=Qwen).
-2. **Use the models**: You can directly use these models without any additional approval process.
-
 ## Datasets
-
-### MIRAGE
-
-The [MIRAGE benchmark](https://github.com/Teddy-XiongGZ/MIRAGE) offers a comprehensive dataset for evaluating Retrieval-Augmented Generation (RAG) systems in medical question answering. It utilizes the MedRAG toolkit to assess various RAG components. The benchmark data is available in the `benchmark.json` file within the repository.
-
-For more information, visit the [MIRAGE GitHub repository](https://github.com/Teddy-XiongGZ/MIRAGE).
 
 ### EHRNoteQA
 
@@ -100,6 +87,15 @@ If you get an index error when trying to retrieve context, you may need to insta
 `git lfs pull`
 
 You may need to update the sentence transformers module `sudo apt update sentence_transformers`
+
+## VM Notes
+
+1 Nvidia L4 GPU via GCP
+- g2-standard-4 (4 vCPUs + 16 GB Mem)
+- 200GB disk
+- deep learning image:c2-deeplearning-pytorch-2-4-cu124-v20250325-debian-11
+- once the VM is provisioned, use the web SSH interface provided to log in and select yes when prompted to install the Nvidia driver
+- now you can use your IDE to ssh in and you can create a .venv, install the requirements file and go from there
 
 ## Acknowledgment
 
