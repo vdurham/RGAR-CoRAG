@@ -40,18 +40,18 @@ def get_generate_subquery_prompt(query: str,
 
 def get_generate_intermediate_answer_prompt(subquery: str, documents: List[str]) -> List[Dict]:
     context = ''
-    for idx, doc in enumerate(documents):
-        context += f"""{doc}\n\n"""
+    for doc in documents:
+        context += f"""{doc}\n"""
 
     prompt = f"""Given the following documents, generate an appropriate answer for the query. DO NOT hallucinate any information, only use the provided documents to generate the answer. Respond "No relevant information found" if the documents do not contain useful information.
 
-## Documents
-{context.strip()}
+    ## Documents
+    {context.strip()}
 
-## Query
-{subquery}
+    ## Query
+    {subquery}
 
-Respond with a concise answer only, do not explain yourself or output anything else."""
+    Respond with a concise answer only, do not explain yourself or output anything else."""
 
     messages: List[Dict] = [
         {'role': 'user', 'content': prompt}

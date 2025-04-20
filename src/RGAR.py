@@ -162,7 +162,7 @@ class RGAR:
             [CustomStoppingCriteria(stop_str, self.tokenizer, input_len)])
         return stopping_criteria
 
-    def generate(self, messages):
+    def generate(self, messages, return_logprobs=False):
         '''
         generate response given messages
         '''
@@ -172,32 +172,60 @@ class RGAR:
                 messages=messages,
                 temperature=0.0,
             )
+            return ans
         elif "gemini" in self.llm_name.lower():
             response = self.model.generate_content(
                 messages[0]["content"] + '\n\n' + messages[1]["content"])
             ans = response.candidates[0].content.parts[0].text
+            return ans
         else:
             stopping_criteria = None
             prompt = self.tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True)
+            
             if "meditron" in self.llm_name.lower():
-                # stopping_criteria = custom_stop(["###", "User:", "\n\n\n"], self.tokenizer, input_len=len(self.tokenizer.encode(prompt_cot, add_special_tokens=True)))
                 stopping_criteria = self.custom_stop(["###", "User:", "\n\n\n"], input_len=len(
                     self.tokenizer.encode(prompt, add_special_tokens=True)))
             elif "llama-3" in self.llm_name.lower():
-                response = self.model(
-                    prompt,
-                    temperature=None,
-                    top_p=None,
-                    do_sample=False,
-                    eos_token_id=self.tokenizer.eos_token_id,
-                    pad_token_id=self.tokenizer.eos_token_id,
-                    # max_length=self.max_length,
-                    max_new_tokens=4096,
-                    repetition_penalty=1.2,
-                    truncation=True,
-                    stopping_criteria=None,
-                )
+                # For llama-3.2, we can get log probabilities
+                if return_logprobs:
+                    response = self.model(
+                        prompt,
+                        temperature=None,
+                        top_p=None,
+                        do_sample=False,
+                        eos_token_id=self.tokenizer.eos_token_id,
+                        pad_token_id=self.tokenizer.eos_token_id,
+                        max_new_tokens=4096,
+                        repetition_penalty=1.2,
+                        truncation=True,
+                        stopping_criteria=None,
+                        output_scores=True,  # Request log probabilities
+                        return_dict_in_generate=True
+                    )
+                    # Extract log probabilities
+                    logprobs = []
+                    for token_scores in response.scores:
+                        # Get the log probability of the chosen token
+                        logprob = token_scores[0].max().item()
+                        logprobs.append(logprob)
+                    
+                    ans = response.sequences[0][len(self.tokenizer.encode(prompt)):]
+                    ans = self.tokenizer.decode(ans, skip_special_tokens=True)
+                    return ans, logprobs
+                else:
+                    response = self.model(
+                        prompt,
+                        temperature=None,
+                        top_p=None,
+                        do_sample=False,
+                        eos_token_id=self.tokenizer.eos_token_id,
+                        pad_token_id=self.tokenizer.eos_token_id,
+                        max_new_tokens=4096,
+                        repetition_penalty=1.2,
+                        truncation=True,
+                        stopping_criteria=None,
+                    )
             elif "qwen" in self.llm_name.lower():
                 response = self.model(
                     prompt,
@@ -206,7 +234,6 @@ class RGAR:
                     do_sample=False,
                     eos_token_id=self.tokenizer.eos_token_id,
                     pad_token_id=self.tokenizer.eos_token_id,
-                    # max_length=self.max_length,
                     max_new_tokens=4096,
                     repetition_penalty=1.2,
                     truncation=True,
@@ -222,9 +249,9 @@ class RGAR:
                     truncation=True,
                     stopping_criteria=stopping_criteria
                 )
-            # ans = response[0]["generated_text"]
+            
             ans = response[0]["generated_text"][len(prompt):]
-        return ans
+            return ans
 
     def extract_factual_info_rag(self, question, retrieved_snippets):
         _, other_sentences, last_sentence = self.split_sentences(
@@ -349,9 +376,7 @@ class RGAR:
         return len(sentences), other_sentences, last_sentence
 
     def retrieve_me_GAR_original_pro(self, question, k=32, rrf_k=100,
-                                     search_method="best_of_n", n=3, expand_size=3,
-                                     num_rollouts=2, beam_size=1, max_path_length=3,
-                                     temperature=0.7):
+                                      n=3, max_path_length=3, temperature=0.7):
         """
         Enhanced retrieval method that uses path sampling techniques (best_of_n or tree_search)
         to generate better queries for retrieval.
@@ -361,28 +386,14 @@ class RGAR:
         _, patient_context, patient_question = self.split_sentences(
             question)
 
-        if search_method == "best_of_n":
-            path = self.best_of_n(
-                query=patient_question,
-                context=patient_context,
-                max_path_length=max_path_length,
-                temperature=temperature,
-                n=n,
-                k=k, rrf_k=rrf_k
-            )
-        elif search_method == "tree_search":
-            path = self.tree_search(
-                query=patient_question,
-                context=patient_context,
-                max_path_length=max_path_length,
-                temperature=temperature,
-                expand_size=expand_size,
-                num_rollouts=num_rollouts,
-                beam_size=beam_size,
-                k=k, rrf_k=rrf_k
-            )
-        else:
-            raise ValueError(f"Unknown search method: {search_method}")
+        path = self.best_of_n(
+            query=patient_question,
+            context=patient_context,
+            max_path_length=max_path_length,
+            temperature=temperature,
+            n=n,
+            k=k, rrf_k=rrf_k
+        )
 
         return path
 
@@ -547,9 +558,9 @@ class RGAR:
                         question, copy_options, k, rrf_k)
                 # transform the question by RGAR, easy implementation for round 1
                 elif self.me == 2:
-                    # TODO: alter data structure to accept the path data structure!!
-                    retrieved_snippets, scores = self.retrieve_me_GAR_original_pro(
-                        question, copy_options, k, rrf_k)
+                    # now returning the best path!
+                    best_path = self.retrieve_me_GAR_original_pro(
+                        question, k, rrf_k)
 
             contexts = ["Document [{:d}] (Title: {:s}) {:s}".format(
                 idx, retrieved_snippets[idx]["title"], retrieved_snippets[idx]["content"]) for idx in range(len(retrieved_snippets))]
@@ -610,7 +621,8 @@ class RGAR:
     ) -> RagPath:
         past_subqueries: List[str] = kwargs.pop('past_subqueries', [])
         past_subanswers: List[str] = kwargs.pop('past_subanswers', [])
-        assert len(past_subqueries) == len(past_subanswers)
+        scores: List[float] = kwargs.pop('scores', [])
+        assert len(past_subqueries) == len(past_subanswers) == len(scores)
 
         # For a single path, generate max_path_length subqueries and subanswers
         num_llm_calls: int = 0
@@ -636,6 +648,10 @@ class RGAR:
         all_retrieved_snippets.extend(retrieved_snippets)
         all_scores.extend(scores)
 
+        # generate initial set of documents
+        documents = ["Document [{:d}] (Title: {:s}) {:s}".format(
+            idx, snippet["title"], snippet["content"]) 
+            for idx, snippet in enumerate(all_retrieved_snippets)]
 
         while len(past_subqueries) < max_path_length and num_llm_calls < max_num_llm_calls:
             num_llm_calls += 1
@@ -654,19 +670,29 @@ class RGAR:
             if subquery in past_subqueries:
                 continue
 
-            subquery_snippets, subquery_scores = self.retrieval_system.retrieve(
+            subquery_snippets, _ = self.retrieval_system.retrieve(
                 query=subquery, k=k//4, rrf_k=rrf_k)
-            all_retrieved_snippets.extend(subquery_snippets)
-            all_scores.extend(subquery_scores)
 
-            subquery = _normalize_subquery(subquery)
+            # Format documents for the intermediate answer generation
+            subquery_documents = ["Document [{:d}] (Title: {:s}) {:s}".format(
+            idx + len(all_retrieved_snippets), snippet["title"], snippet["content"]) 
+            for idx, snippet in enumerate(subquery_snippets)]
+
+            combined_docs = documents.copy()
+            combined_docs.extend(subquery_documents)
 
             messages: List[Dict] = get_generate_intermediate_answer_prompt(
                 subquery=subquery,
-                documents=documents)
-            self._truncate_long_messages(messages, max_length=max_message_length)
-
-            subanswer: str = self.generate(messages=messages)
+                documents=combined_docs)
+            
+            # Get both answer and log probabilities in one call
+            subanswer, logprobs = self.generate(messages=messages, return_logprobs=True)
+            
+            # Store the log probabilities directly in the path
+            if logprobs:
+                scores.append(sum(logprobs) / len(logprobs))
+            else:
+                scores.append(0.0)
 
             past_subqueries.append(subquery)
             past_subanswers.append(subanswer)
@@ -674,7 +700,8 @@ class RGAR:
         return RagPath(
             query=query,
             past_subqueries=past_subqueries,
-            past_subanswers=past_subanswers
+            past_subanswers=past_subanswers,
+            scores=scores
         )
 
     def generate_final_answer(
@@ -689,34 +716,20 @@ class RGAR:
             context=context,
             documents=documents,
         )
-        self._truncate_long_messages(messages, max_length=max_message_length)
+        # self._truncate_long_messages(messages, max_length=max_message_length)
 
         return self.generate(messages=messages)
 
-    def _truncate_long_messages(self, messages: List[Dict], max_length: int):
-        for msg in messages:
-            if len(msg['content']) < 2 * max_length:
-                continue
-
-            with self.lock:
-                msg['content'] = batch_truncate(
-                    [msg['content']], tokenizer=self.tokenizer, max_length=max_length, truncate_from_middle=True
-                )[0]
-
-    def sample_subqueries(self, query: str, context: str, n: int = 10, max_message_length: int = 4096, **kwargs) -> List[str]:
-        messages: List[Dict] = get_generate_subquery_prompt(
-            query=query,
-            past_subqueries=kwargs.pop('past_subqueries', []),
-            past_subanswers=kwargs.pop('past_subanswers', []),
-            context=context,
-        )
-        self._truncate_long_messages(messages, max_length=max_message_length)
-
-        completion = self.generate(messages=messages)
-        subqueries = [_normalize_subquery(completion)]
-        subqueries = list(set(subqueries))[:n]
-
-        return subqueries
+    # def _truncate_long_messages(self, messages: List[Dict], max_length: int):
+    #     for msg in messages:
+    #         if len(msg['content']) < 2 * max_length:
+    #             continue
+            
+    #         #TODO: get batch_truncate back!!
+    #         with self.lock:
+    #             msg['content'] = batch_truncate(
+    #                 [msg['content']], tokenizer=self.tokenizer, max_length=max_length, truncate_from_middle=True
+    #             )[0]
 
     def best_of_n(
             self, query: str, context: str,
@@ -743,18 +756,26 @@ class RGAR:
         return sampled_paths[scores.index(min(scores))]
 
     def _eval_single_path(self, current_path: RagPath, max_message_length: int = 4096) -> float:
-        messages: List[Dict] = get_generate_intermediate_answer_prompt(
-            subquery=current_path.query,
-            documents=[f'Q: {q}\nA: {a}' for q, a in zip(current_path.past_subqueries, current_path.past_subanswers)],
-        )
-        messages.append({'role': 'assistant', 'content': 'No relevant information found'})
-        self._truncate_long_messages(messages, max_length=max_message_length)
+        # Use scores directly from the path if available
+        if current_path.scores:
+            return sum(current_path.scores) / len(current_path.scores)
+        
+        # # Fallback to generating new scores if not available
+        # messages: List[Dict] = get_generate_intermediate_answer_prompt(
+        #     subquery=current_path.query,
+        #     documents=[f'Q: {q}\nA: {a}' for q, a in zip(current_path.past_subqueries, current_path.past_subanswers)],
+        # )
+        # messages.append({'role': 'assistant', 'content': 'No relevant information found'})
 
-        # TODO: call llama agent from RGAR instead
-        response = self.generate(messages=messages)
-        answer_logprobs: List[float] = parse_answer_logprobs(response)
-
-        return sum(answer_logprobs) / len(answer_logprobs)
+        # # Get both answer and log probabilities
+        # answer, logprobs = self.generate(messages=messages, return_logprobs=True)
+        
+        # # Calculate average log probability
+        # if logprobs:
+        #     return sum(logprobs) / len(logprobs)
+        # else:
+        #     # Fallback if no log probabilities available
+        #     return 0.0
 
 
 class CustomStoppingCriteria(StoppingCriteria):
