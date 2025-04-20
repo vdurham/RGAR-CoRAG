@@ -386,7 +386,7 @@ class RGAR:
         _, patient_context, patient_question = self.split_sentences(
             question)
 
-        path = self.best_of_n(
+        path, retrieved_snippets = self.best_of_n(
             query=patient_question,
             context=patient_context,
             max_path_length=max_path_length,
@@ -395,7 +395,7 @@ class RGAR:
             k=k, rrf_k=rrf_k
         )
 
-        return path
+        return path, retrieved_snippets
 
     def retrieve_me_GAR_original(self, question, options="", k=32, rrf_k=100):
 
@@ -559,19 +559,16 @@ class RGAR:
                 # transform the question by RGAR, easy implementation for round 1
                 elif self.me == 2:
                     # now returning the best path!
-                    best_path = self.retrieve_me_GAR_original_pro(
+                    best_path, retrieved_snippets = self.retrieve_me_GAR_original_pro(
                         question, k, rrf_k)
 
             contexts = ["Document [{:d}] (Title: {:s}) {:s}".format(
                 idx, retrieved_snippets[idx]["title"], retrieved_snippets[idx]["content"]) for idx in range(len(retrieved_snippets))]
             if len(contexts) == 0:
                 contexts = [""]
-            if "openai" in self.llm_name.lower():
-                contexts = [self.tokenizer.decode(self.tokenizer.encode(
-                    "\n".join(contexts))[:self.context_length])]
-            else:
-                contexts = [self.tokenizer.decode(self.tokenizer.encode(
-                    "\n".join(contexts), add_special_tokens=False)[:self.context_length])]
+
+            contexts = [self.tokenizer.decode(self.tokenizer.encode(
+                "\n".join(contexts), add_special_tokens=False)[:self.context_length])]
         else:
             retrieved_snippets = []
             scores = []
@@ -593,8 +590,9 @@ class RGAR:
             answers.append(re.sub("\s+", " ", ans))
         else:
             for context in contexts:
-                prompt_medrag = self.templates["medrag_prompt"].render(
-                    context=context, question=question, options=options)
+                prompt_medrag = get_generate_final_answer_prompt(best_path.query, best_path.past_subqueries, best_path.past_subanswers, context, options)
+                # prompt_medrag = self.templates["medrag_prompt"].render(
+                #     context=context, question=question, options=options)
                 messages = [
                     {"role": "system",
                         "content": self.templates["medrag_system"]},
@@ -618,7 +616,7 @@ class RGAR:
             max_message_length: int = 4096,
             k: int = 32, rrf_k: int = 100,
             **kwargs
-    ) -> RagPath:
+    ) -> Tuple[RagPath, List[Dict]]:
         past_subqueries: List[str] = kwargs.pop('past_subqueries', [])
         past_subanswers: List[str] = kwargs.pop('past_subanswers', [])
         scores: List[float] = kwargs.pop('scores', [])
@@ -697,11 +695,14 @@ class RGAR:
             past_subqueries.append(subquery)
             past_subanswers.append(subanswer)
 
-        return RagPath(
-            query=query,
-            past_subqueries=past_subqueries,
-            past_subanswers=past_subanswers,
-            scores=scores
+        return (
+            RagPath(
+                query=query,
+                past_subqueries=past_subqueries,
+                past_subanswers=past_subanswers,
+                scores=scores
+            ),
+            all_retrieved_snippets
         )
 
     def generate_final_answer(
@@ -742,7 +743,7 @@ class RGAR:
     ) -> RagPath:
         sampled_paths: List[RagPath] = []
         for idx in range(n):
-            path: RagPath = self.sample_path(
+            path, retrieved_snippets = self.sample_path(
                 query=query, context=context,
                 max_path_length=max_path_length,
                 max_message_length=max_message_length,
@@ -753,7 +754,7 @@ class RGAR:
             sampled_paths.append(path)
 
         scores: List[float] = [self._eval_single_path(p) for p in sampled_paths]
-        return sampled_paths[scores.index(min(scores))]
+        return sampled_paths[scores.index(min(scores))], retrieved_snippets
 
     def _eval_single_path(self, current_path: RagPath, max_message_length: int = 4096) -> float:
         # Use scores directly from the path if available
