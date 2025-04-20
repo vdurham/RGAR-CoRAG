@@ -3,10 +3,11 @@
 # we developed RGAR based on MedRAG
 # we developed RAG systems without CoT based on MedRAG
 # we add support for qwens
-from utils import batch_truncate
+import sys
+sys.path.append("src")
+
 from agent_utils import RagPath
 from prompts import get_generate_subquery_prompt, get_generate_intermediate_answer_prompt, get_generate_final_answer_prompt
-from data_utils import format_input_context, parse_answer_logprobs
 from typing import Optional, List, Dict, Tuple
 from copy import deepcopy
 import tiktoken
@@ -21,8 +22,7 @@ import os
 from utils import RetrievalSystem, DocExtracter
 from template import *
 from config import config
-import sys
-sys.path.append("src")
+
 
 # imports for added CoRAG methods
 
@@ -210,9 +210,9 @@ class RGAR:
                         logprob = token_scores[0].max().item()
                         logprobs.append(logprob)
                     
-                    ans = response.sequences[0][len(self.tokenizer.encode(prompt)):]
-                    ans = self.tokenizer.decode(ans, skip_special_tokens=True)
-                    return ans, logprobs
+                    # ans = response.sequences[0][len(self.tokenizer.encode(prompt)):]
+                    # ans = self.tokenizer.decode(ans, skip_special_tokens=True)
+                    return response, logprobs
                 else:
                     response = self.model(
                         prompt,
@@ -299,12 +299,21 @@ class RGAR:
 
         print(f"Generated Answer: {answers}")
 
-        matched_items = re.findall(r'"([^"]*)"', answers)
-
-        if matched_items:
+        list_match = re.search(r'\[(.*?)\]', answers)
+        
+        if list_match:
+            # Get the content inside the square brackets
+            list_content = list_match.group(1)
+            
+            # Split by commas and clean up each item
+            matched_items = [item.strip().strip("'").strip('"') for item in list_content.split(',')]
+            
+            # Filter out empty items
+            matched_items = [item for item in matched_items if item]
+            
             print(f"number queries: {len(matched_items)}")
             print(f"extract info: {matched_items}")
-
+            
             return matched_items, answers
         else:
             print("no info found")
@@ -323,7 +332,7 @@ class RGAR:
         answers.append(re.sub("\s+", " ", ans))
         answers = answers[0]
 
-        print(f"Generated Answer: {answers}")
+        print(f"Generated Possible Content: {answers}")
         return answers
 
     def generate_possible_answer(self, question):
@@ -340,7 +349,7 @@ class RGAR:
         answers.append(re.sub("\s+", " ", ans))
         answers = answers[0]
 
-        print(f"Generated Answer: {answers}")
+        print(f"Generated Possible Answers: {answers}")
         return answers
 
     def generate_possible_title(self, question):
@@ -357,7 +366,7 @@ class RGAR:
         answers.append(re.sub("\s+", " ", ans))
         answers = answers[0]
 
-        print(f"Generated Answer: {answers}")
+        print(f"Generated Possible Titles: {answers}")
         return answers
 
     def split_sentences(self, text):
@@ -669,7 +678,7 @@ class RGAR:
                 continue
 
             subquery_snippets, _ = self.retrieval_system.retrieve(
-                query=subquery, k=k//4, rrf_k=rrf_k)
+                subquery, k=k//4, rrf_k=rrf_k)
 
             # Format documents for the intermediate answer generation
             subquery_documents = ["Document [{:d}] (Title: {:s}) {:s}".format(
@@ -685,6 +694,7 @@ class RGAR:
             
             # Get both answer and log probabilities in one call
             subanswer, logprobs = self.generate(messages=messages, return_logprobs=True)
+            print(f"Generated Subanswer: {subanswer}")
             
             # Store the log probabilities directly in the path
             if logprobs:
