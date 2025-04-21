@@ -193,7 +193,7 @@ class RGAR:
                         do_sample=True,
                         eos_token_id=self.tokenizer.eos_token_id,
                         pad_token_id=self.tokenizer.eos_token_id,
-                        max_new_tokens=4096,
+                        max_new_tokens=3072,
                         repetition_penalty=1.2,
                         truncation=True,
                         stopping_criteria=None
