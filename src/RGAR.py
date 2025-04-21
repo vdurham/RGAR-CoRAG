@@ -7,7 +7,7 @@ import sys
 sys.path.append("src")
 
 from agent_utils import RagPath
-from prompts import get_generate_subquery_prompt, get_generate_intermediate_answer_prompt, get_generate_final_answer_prompt
+from prompts import get_generate_subquery_prompt
 from typing import Optional, List, Dict, Tuple
 from copy import deepcopy
 import tiktoken
@@ -22,6 +22,8 @@ import os
 from utils import RetrievalSystem, DocExtracter
 from template import *
 from config import config
+
+DECODE_STRATEGY = "greedy"  # "greedy" or "best_of_n"
 
 
 def _normalize_subquery(subquery: str) -> str:
@@ -159,7 +161,7 @@ class RGAR:
             [CustomStoppingCriteria(stop_str, self.tokenizer, input_len)])
         return stopping_criteria
 
-    def generate(self, messages, use_temp=False):
+    def generate(self, messages, use_temp=0.):
         '''
         generate response given messages
         '''
@@ -185,10 +187,10 @@ class RGAR:
                     self.tokenizer.encode(prompt, add_special_tokens=True)))
             elif "llama-3" in self.llm_name.lower():
                 # For llama-3.2, we can get log probabilities
-                if use_temp:
+                if use_temp > 0:
                     response = self.model(
                         prompt,
-                        temperature=0.7,
+                        temperature=use_temp,
                         top_p=0.9,
                         do_sample=True,
                         eos_token_id=self.tokenizer.eos_token_id,
@@ -380,14 +382,24 @@ class RGAR:
         _, patient_context, patient_question = self.split_sentences(
             question)
 
-        path, retrieved_snippets = self.best_of_n(
-            query=patient_question,
-            context=patient_context,
-            max_path_length=max_path_length,
-            temperature=temperature,
-            n=n,
-            k=k, rrf_k=rrf_k
-        )
+        if DECODE_STRATEGY == "best_of_n":
+            path, retrieved_snippets = self.best_of_n(
+                query=patient_question,
+                context=patient_context,
+                max_path_length=max_path_length,
+                temperature=temperature,
+                n=n,
+                k=k, rrf_k=rrf_k
+            )
+        else:
+            path, retrieved_snippets = self.greedy(
+                query=patient_question,
+                context=patient_context,
+                max_path_length=max_path_length,
+                temperature=temperature,
+                n=n,
+                k=k, rrf_k=rrf_k
+            )
 
         return path, retrieved_snippets
 
@@ -584,7 +596,7 @@ class RGAR:
             answers.append(re.sub("\s+", " ", ans))
         else:
             for context in contexts:
-                prompt_medrag = get_generate_final_answer_prompt(best_path.query, best_path.past_subqueries, best_path.past_subanswers, context, options)
+                prompt_medrag = self.get_generate_final_answer_prompt(best_path.query, best_path.past_subqueries, best_path.past_subanswers, context, options)
                 # prompt_medrag = self.templates["medrag_prompt"].render(
                 #     context=context, question=question, options=options)
                 messages = [
@@ -608,6 +620,8 @@ class RGAR:
             self, query: str, context: str,
             max_path_length: int = 3,
             max_message_length: int = 4096,
+            temperature: float = 0.7,
+            n: int = 4,
             k: int = 32, rrf_k: int = 100,
             **kwargs
     ) -> Tuple[RagPath, List[Dict]]:
@@ -655,7 +669,7 @@ class RGAR:
                 past_subanswers=past_subanswers,
                 extracted_facts=patient_facts
             )
-            subquery = self.generate(messages=subquery_messages, use_temp=True)
+            subquery = self.generate(messages=subquery_messages, use_temp=temperature)
             print(f"Generated Subquery: {subquery}")
             subquery = subquery.strip()
 
@@ -674,12 +688,13 @@ class RGAR:
             combined_docs = documents.copy()
             combined_docs.extend(subquery_documents)
 
-            messages: List[Dict] = get_generate_intermediate_answer_prompt(
+            messages: List[Dict] = self.get_generate_intermediate_answer_prompt(
                 subquery=subquery,
-                documents=combined_docs)
+                documents=combined_docs,
+                patient_facts=patient_facts)
             
             # Get both answer and log probabilities in one call
-            subanswer = self.generate(messages=messages, use_temp=True)
+            subanswer = self.generate(messages=messages, use_temp=temperature)
             subanswer = subanswer.strip()
             print(f"Generated Subanswer: {subanswer}")
             
@@ -703,12 +718,13 @@ class RGAR:
             all_retrieved_snippets
         )
 
+
     def generate_final_answer(
             self, corag_sample: RagPath, context: str,
             max_message_length: int = 4096,
             documents: Optional[List[str]] = None, **kwargs
     ) -> str:
-        messages: List[Dict] = get_generate_final_answer_prompt(
+        messages: List[Dict] = self.get_generate_final_answer_prompt(
             query=corag_sample.query,
             past_subqueries=corag_sample.past_subqueries or [],
             past_subanswers=corag_sample.past_subanswers or [],
@@ -753,6 +769,26 @@ class RGAR:
 
         scores: List[float] = [self._eval_single_path(p) for p in sampled_paths]
         return sampled_paths[scores.index(min(scores))], retrieved_snippets
+    
+    def greedy(
+            self, query: str, context: str,
+            max_path_length: int = 3,
+            max_message_length: int = 4096,
+            temperature: float = 0.7,
+            n: int = 4,
+            k: int = 32, rrf_k: int = 100,
+            **kwargs
+    ) -> RagPath:
+        path, retrieved_snippets = self.sample_path(
+            query=query, context=context,
+            max_path_length=max_path_length,
+            max_message_length=max_message_length,
+            temperature=0.,
+            k=k, rrf_k=rrf_k,
+            **kwargs
+        )
+
+        return path, retrieved_snippets
 
     def _eval_single_path(self, current_path: RagPath, max_message_length: int = 4096) -> float:
         # Use scores directly from the path if available
@@ -775,6 +811,101 @@ class RGAR:
         # else:
         #     # Fallback if no log probabilities available
         #     return 0.0
+    
+    def get_generate_intermediate_answer_prompt(self, subquery: str, documents: List[str], 
+                                           patient_facts: List[str] = None, 
+                                           max_tokens: int = 4096) -> List[Dict]:
+
+        facts_text = ', '.join(patient_facts) if patient_facts else 'No relevant patient facts provided'
+        
+        # Base prompt without documents
+        base_prompt = f"""Given the following documents, generate an appropriate answer for the query. DO NOT hallucinate any information, only use the provided documents to generate the answer. Respond "No relevant information found" if the documents do not contain useful information.
+## Documents
+[DOCUMENTS_PLACEHOLDER]
+## Patient Facts
+{facts_text}
+## Query
+{subquery}
+Respond with a concise answer only, do not explain yourself or output anything else."""
+        
+        # Replace placeholder with empty string to calculate base tokens
+        base_prompt_no_docs = base_prompt.replace("[DOCUMENTS_PLACEHOLDER]", "")
+        
+        # Get the exact token count using the model's tokenizer
+        base_token_count = len(self.tokenizer.encode(base_prompt_no_docs, add_special_tokens=False))
+        max_doc_tokens = max_tokens - base_token_count
+        
+        # Build context while respecting token limit
+        context = ''
+        current_tokens = 0
+        
+        for doc in documents:
+            doc_tokens = len(self.tokenizer.encode(doc, add_special_tokens=False))
+            if current_tokens + doc_tokens > max_doc_tokens:
+                # If we can't fit the whole document, stop adding more
+                break
+            context += f"{doc}\n"
+            current_tokens += doc_tokens
+        
+        # Format the final prompt
+        final_prompt = base_prompt.replace("[DOCUMENTS_PLACEHOLDER]", context.strip())
+        
+        messages: List[Dict] = [
+            {'role': 'user', 'content': final_prompt}
+        ]
+        return messages
+    
+    def get_generate_final_answer_prompt(
+        self,
+        query: str, 
+        past_subqueries: List[str], 
+        past_subanswers: List[str], 
+        context: str, 
+        options: str,
+        max_tokens: int = 4096
+    ) -> List[Dict]:
+
+        assert len(past_subqueries) == len(past_subanswers)
+        
+        # Format the intermediate Q&A history
+        past = ''
+        for idx in range(len(past_subqueries)):
+            past += f"""Intermediate query {idx+1}: {past_subqueries[idx]} \n Intermediate answer {idx+1}: {past_subanswers[idx]}\n"""
+        past = past.strip()
+        
+        # Base prompt template with placeholders
+        base_prompt = f"""Given the following intermediate queries and answers, generate a final answer for the main query by combining relevant information. Note that intermediate answers are generated by an LLM and may not always be accurate.
+## Documents
+[DOCUMENTS_PLACEHOLDER]
+## Intermediate queries and answers
+{past or 'Nothing yet'}
+## Main query
+{query}
+## Options
+{options}
+Please generate your output in JSON format as {{"answer_choice": "X"}}. Do not include any other text or explanations."""
+        
+        # Replace placeholder with empty string to calculate base tokens
+        base_prompt_no_docs = base_prompt.replace("[DOCUMENTS_PLACEHOLDER]", "")
+        
+        # Get the exact token count using the model's tokenizer
+        base_token_count = len(self.tokenizer.encode(base_prompt_no_docs, add_special_tokens=False))
+        max_doc_tokens = max_tokens - base_token_count
+        
+        # Truncate the context if needed
+        if len(self.tokenizer.encode(context, add_special_tokens=False)) > max_doc_tokens:
+            # If we need to truncate, encode and then decode just the allowed number of tokens
+            encoded_context = self.tokenizer.encode(context, add_special_tokens=False)
+            truncated_context = self.tokenizer.decode(encoded_context[:max_doc_tokens])
+            context = truncated_context + "\n[Content truncated due to length limitations]"
+        
+        # Format the final prompt
+        final_prompt = base_prompt.replace("[DOCUMENTS_PLACEHOLDER]", context)
+        
+        messages: List[Dict] = [
+            {'role': 'user', 'content': final_prompt}
+        ]
+        return messages
 
 
 class CustomStoppingCriteria(StoppingCriteria):
