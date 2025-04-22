@@ -11,7 +11,7 @@ class QADataset:
 
     def __init__(self, data, dir="."):
         self.data = data.lower().split("_")[0]
-        benchmark = json.load(open(os.path.join(dir, "ehrnoteqa.json")))
+        benchmark = json.load(open(os.path.join(dir, "validation.json")))
         if self.data not in benchmark:
             raise KeyError("{:s} not supported".format(data))
         self.dataset = benchmark[self.data]

@@ -670,7 +670,7 @@ class RGAR:
                 extracted_facts=patient_facts
             )
             subquery = self.generate(messages=subquery_messages, use_temp=temperature)
-            print(f"Generated Subquery: {subquery}")
+            # print(f"Generated Subquery: {subquery}")
             subquery = subquery.strip()
 
             # skip if seen before
@@ -696,7 +696,7 @@ class RGAR:
             # Get both answer and log probabilities in one call
             subanswer = self.generate(messages=messages, use_temp=temperature)
             subanswer = subanswer.strip()
-            print(f"Generated Subanswer: {subanswer}")
+            # print(f"Generated Subanswer: {subanswer}")
             
             logprobs =None
             # Store the log probabilities directly in the path
